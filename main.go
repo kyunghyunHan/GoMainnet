@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
+	"math"
 	"math/big"
 	"time"
 )
@@ -17,14 +18,15 @@ type Block struct {
 	Hash          []byte
 	Timestamp     int64
 	Data          []byte
+	Nonce         int64
 }
 
 //새로운블록
 func NewBlock(data string, prevBloclHash []byte) *Block {
-	block := Block{prevBloclHash, []byte{}, time.Now().Unix(), []byte(data)}
-	block.SetHash()
-
-	return &block
+	block := &Block{prevBloclHash, []byte{}, time.Now().Unix(), []byte(data), 0}
+	pow := NewProofOfWork(block)
+	block.Nonce, block.Hash = pow.Run()
+	return block
 }
 
 //블록의 해시를설정
@@ -85,6 +87,46 @@ func NewProofOfWork(b *Block) *ProofOfWork {
 	return &ProofOfWork{b, target}
 }
 
+//nonce target보다 더 작은 값을 찾기위해 데이터를 준비시키위한 준비
+func (pow *ProofOfWork) prepareData(nonce int64) []byte {
+	data := bytes.Join([][]byte{
+		pow.block.PrevBlockHash,
+		pow.block.Data,
+		IntToHex(pow.block.Timestamp),
+		IntToHex(nonce),
+		IntToHex(targetBits),
+	}, []byte{})
+	return data
+}
+func (pow *ProofOfWork) Run() (int64, []byte) {
+
+	var nonce int64
+	var hashInt big.Int
+	var hash [32]byte
+
+	for nonce < math.MaxInt64 {
+		data := pow.prepareData(nonce)
+		hash = sha256.Sum256(data)
+
+		hashInt.SetBytes(hash[:])
+		if hashInt.Cmp(pow.target) == -1 {
+			break
+		}
+		nonce++
+	}
+	return nonce, hash[:]
+}
+
+func (pow *ProofOfWork) Validata(b *Block) bool {
+	var hashInt big.Int
+	data := pow.prepareData(b.Nonce)
+	hash := sha256.Sum256(data)
+
+	hashInt.SetBytes(hash[:])
+
+	return hashInt.Cmp(pow.target) == -1
+}
+
 //트랜잭션,합의 알고리즘,주소 ,네트워크 등
 func main() {
 	bc := NewBlockchain()
@@ -96,6 +138,8 @@ func main() {
 		fmt.Printf("PrevBlockHash: %x\n", b.PrevBlockHash)
 		fmt.Printf("Hash: %x\n", b.Hash)
 		fmt.Printf("PrevBlockHash: %x\n", b.Hash)
+		pow := NewProofOfWork(b)
+		fmt.Println("pow:", pow.Validata(b))
 
 		fmt.Println()
 	}
