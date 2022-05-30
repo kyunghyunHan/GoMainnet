@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/gob"
 	"fmt"
 	"log"
 	"math"
 	"math/big"
 	"time"
+
+	"github.com/boltdb/bolt"
 )
 
 //브록들을 체인형태로 연결
@@ -19,6 +22,10 @@ type Block struct {
 	Timestamp     int64
 	Data          []byte
 	Nonce         int64
+}
+type blockchainIterator struct {
+	db   *bolt.DB
+	hash []byte
 }
 
 //새로운블록
@@ -56,19 +63,79 @@ func IntToHex(i int64) []byte {
 
 //다수의 블록
 type Blockchain struct {
-	blocks []*Block
+	db *bolt.DB
+	l  []byte
 }
+
+const (
+	BlocksBucks = "blocks"
+	dbFile      = "chain.db"
+)
 
 //제네시스 블록을 미리 포함
 //첫번쨰 블록
 func NewBlockchain() *Blockchain {
-	return &Blockchain{[]*Block{NewBlock("Genesis Block", []byte{})}}
+	db, err := bolt.Open(dbFile, 0600, nil)
+	if err != nil {
+		log.Panic(err)
+	}
+	var l []byte
+	err = db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(BlocksBucks))
+
+		if b == nil {
+			//새로운블록체인을 만들어야 하는 경우
+			b, err := tx.CreateBucket([]byte(BlocksBucks))
+			if err != nil {
+				log.Panic(err)
+			}
+			genesis := NewBlock("Genesis Block", []byte{})
+
+			err = b.Put(genesis.Hash, genesis.Serialize())
+			if err != nil {
+				log.Panic(err)
+			}
+
+			//l키는 마지막 블록해시를 저장
+			err = b.Put([]byte("l"), genesis.Hash)
+			if err != nil {
+				log.Panic(err)
+			}
+			l = genesis.Hash
+
+		} else {
+			//이미 블록체인이 있는 경우
+			l = b.Get([]byte("l"))
+		}
+		if err != nil {
+			log.Panic(err)
+		}
+		return nil
+	})
 }
 
 //블록체인에 새로운 블록 포함
+//blocks에 저장하던 것을 스토어에 저장할수 있도록 변경
 func (bc *Blockchain) AddBlock(data string) {
-	block := NewBlock(data, bc.blocks[len(bc.blocks)-1].Hash)
-	bc.blocks = append(bc.blocks, block)
+	block := NewBlock(data, bc.l)
+	err := bc.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(BlocksBucks))
+
+		err := b.Put(block.Hash, block.Serialize())
+		if err != nil {
+			log.Panic(err)
+		}
+		err = b.Put([]byte("l"), block.Hash)
+		if err != nil {
+			log.Panic(err)
+		}
+		bc.l = block.Hash
+
+		return nil
+	})
+	if err != nil {
+		log.Panic(err)
+	}
 }
 
 //해시값을 찾을 블록,
@@ -125,6 +192,58 @@ func (pow *ProofOfWork) Validata(b *Block) bool {
 	hashInt.SetBytes(hash[:])
 
 	return hashInt.Cmp(pow.target) == -1
+}
+
+//영속성
+func (b *Block) Serialize() []byte {
+	var buf bytes.Buffer
+
+	encoder := gob.NewEncoder(&buf)
+
+	err := encoder.Encode(b)
+
+	if err != nil {
+		log.Panic(err)
+	}
+	return buf.Bytes()
+}
+
+func DeserializeBlock(encodedBlock []byte) *Block {
+	var buf bytes.Buffer
+	var block Block
+
+	buf.Write(encodedBlock)
+	decoder := gob.NewDecoder(&buf)
+
+	err := decoder.Decode(&block)
+	if err != nil {
+		log.Panic(err)
+	}
+	return &block
+}
+func NewBlockchainIterator(bc *Blockchain) *blockchainIterator {
+	return &blockchainIterator{bc.db, bc.l}
+}
+func (i *blockchainIterator) Next() *Block {
+	var block *Block
+	err := i.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(BlocksBucks))
+		encodedBlock := b.Get(i.hash)
+		block = DeserializeBlock(encodedBlock)
+
+		i.hash = block.PrevBlockHash
+
+		return nil
+	})
+	if err != nil {
+		log.Panic(err)
+	}
+	return block
+}
+
+//다음블록이 있는지 검사 //제네시스 블록의 이전블록은 없기때문에 제네시스 블록의 값을 활용
+func (i *blockchainIterator) HashNext() bool {
+	return bytes.Compare(i.hash, []byte{}) != 0
 }
 
 //트랜잭션,합의 알고리즘,주소 ,네트워크 등
